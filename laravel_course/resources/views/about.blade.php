@@ -1,0 +1,2 @@
+<h1>welcome to my laravel course</h1>
+<p>Lorem, ipsum dolor sit amet consectetur adipisicing elit. Quia debitis architecto vero doloremque, repudiandae, deleniti omnis molestias laboriosam maxime voluptatem id qui dolores perferendis? Quisquam sequi possimus tenetur rerum! Vel.</p>
