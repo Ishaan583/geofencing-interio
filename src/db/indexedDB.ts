@@ -34,7 +34,7 @@ export interface UserAccount {
 }
 
 const DB_NAME = 'GeoGuardDB';
-const DB_VERSION = 3; // Incremented database version to include users store
+const DB_VERSION = 4; // Bumped version to 4 to guarantee users store creation
 
 export function initDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -58,53 +58,115 @@ export function initDB(): Promise<IDBDatabase> {
   });
 }
 
-// User store CRUD
+// User store CRUD with automatic persistence sync
 export async function getUsers(): Promise<UserAccount[]> {
   if (isSupabaseConfigured && supabase) {
-    const { data, error } = await supabase.from('users').select('*');
-    if (error) throw error;
-    return (data || []) as UserAccount[];
+    try {
+      const { data, error } = await supabase.from('users').select('*');
+      if (!error && data && data.length > 0) {
+        localStorage.setItem('geoguard_users_backup', JSON.stringify(data));
+        return data as UserAccount[];
+      }
+    } catch (e) {
+      console.warn('Supabase getUsers error, falling back to local storage:', e);
+    }
   }
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('users', 'readonly');
-    const store = tx.objectStore('users');
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result || []);
-    request.onerror = () => reject(request.error);
-  });
+
+  // Check localStorage backup
+  const localBackup = localStorage.getItem('geoguard_users_backup');
+  const backupUsers: UserAccount[] = localBackup ? JSON.parse(localBackup) : [];
+
+  try {
+    const db = await initDB();
+    const idbUsers = await new Promise<UserAccount[]>((resolve, reject) => {
+      const tx = db.transaction('users', 'readonly');
+      const store = tx.objectStore('users');
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+
+    if (idbUsers.length >= backupUsers.length) {
+      localStorage.setItem('geoguard_users_backup', JSON.stringify(idbUsers));
+      return idbUsers;
+    } else {
+      return backupUsers;
+    }
+  } catch (err) {
+    console.warn('IndexedDB read error, using backup storage:', err);
+    return backupUsers;
+  }
 }
 
 export async function addUser(user: UserAccount): Promise<void> {
-  if (isSupabaseConfigured && supabase) {
-    const { error } = await supabase.from('users').upsert(user);
-    if (error) throw error;
-    return;
+  // Always update local backup first for instantaneous safety
+  try {
+    const localBackup = localStorage.getItem('geoguard_users_backup');
+    const existing: UserAccount[] = localBackup ? JSON.parse(localBackup) : [];
+    const updatedList = existing.filter(u => u.username !== user.username).concat(user);
+    localStorage.setItem('geoguard_users_backup', JSON.stringify(updatedList));
+  } catch (e) {
+    console.warn('LocalStorage backup error:', e);
   }
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('users', 'readwrite');
-    const store = tx.objectStore('users');
-    const request = store.put(user);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { error } = await supabase.from('users').upsert(user);
+      if (error) console.warn('Supabase user upsert error:', error);
+    } catch (e) {
+      console.warn('Supabase user upsert exception:', e);
+    }
+  }
+
+  try {
+    const db = await initDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('users', 'readwrite');
+      const store = tx.objectStore('users');
+      const request = store.put(user);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } catch (err) {
+    console.warn('IndexedDB write error, user safely preserved in local backup:', err);
+  }
 }
 
 export async function getUser(username: string): Promise<UserAccount | undefined> {
   if (isSupabaseConfigured && supabase) {
-    const { data, error } = await supabase.from('users').select('*').eq('username', username).maybeSingle();
-    if (error) throw error;
-    return (data || undefined) as UserAccount | undefined;
+    try {
+      const { data, error } = await supabase.from('users').select('*').eq('username', username).maybeSingle();
+      if (!error && data) return data as UserAccount;
+    } catch (e) {
+      console.warn('Supabase getUser error:', e);
+    }
   }
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('users', 'readonly');
-    const store = tx.objectStore('users');
-    const request = store.get(username);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+
+  try {
+    const db = await initDB();
+    const result = await new Promise<UserAccount | undefined>((resolve, reject) => {
+      const tx = db.transaction('users', 'readonly');
+      const store = tx.objectStore('users');
+      const request = store.get(username);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    if (result) return result;
+  } catch (err) {
+    console.warn('IndexedDB getUser error:', err);
+  }
+
+  // Fallback to localStorage backup
+  try {
+    const localBackup = localStorage.getItem('geoguard_users_backup');
+    if (localBackup) {
+      const users: UserAccount[] = JSON.parse(localBackup);
+      return users.find(u => u.username === username);
+    }
+  } catch (e) {
+    console.warn('LocalStorage backup read error:', e);
+  }
+  return undefined;
 }
 
 // Supervisor CRUD
@@ -390,39 +452,12 @@ export async function seedDemoSupervisor40Days(): Promise<void> {
   }
 }
 
-// Initial seed data helper (kept as a no-op for a clean production database)
+// Initial seed data helper - ensures DB is initialized and ready
 export async function seedInitialData(): Promise<void> {
-  if (isSupabaseConfigured && supabase) {
-    // Keep Supabase cloud database clean for production
-    return;
-  }
-
-  const isWiped = localStorage.getItem('db_wiped_v9');
-  if (!isWiped) {
-    try {
-      const db = await initDB();
-      const stores = ['supervisors', 'checkins', 'users'];
-      const tx = db.transaction(stores, 'readwrite');
-      
-      stores.forEach(s => {
-        if (db.objectStoreNames.contains(s)) {
-          tx.objectStore(s).clear();
-        }
-      });
-
-      // Await database clear transaction to complete fully
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-
-      // Clear local storage sessions
-      localStorage.removeItem('currentUser');
-      localStorage.setItem('db_wiped_v9', 'true');
-      console.log('IndexedDB cleared for fresh clean setup.');
-    } catch (err) {
-      console.error('Failed to clear local database stores:', err);
-    }
+  try {
+    await initDB();
+  } catch (err) {
+    console.error('Failed to initialize local database:', err);
   }
 }
 

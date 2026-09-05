@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Shield, Users, CheckCircle, RefreshCcw, Plus, Trash2, Globe, Search, UserMinus, MapPin, Download, UserCog } from 'lucide-react';
-import { getCheckIns, getSupervisors, addSupervisor, deleteSupervisor, clearCheckIns, seedPastLogsForSupervisor, getUsers, addUser } from '../db/indexedDB';
+import { getCheckIns, getSupervisors, addSupervisor, deleteSupervisor, clearCheckIns, getUsers, addUser } from '../db/indexedDB';
 import type { CheckInLog, Supervisor, UserAccount } from '../db/indexedDB';
 import { MapView } from './MapView';
 import { AttendanceCalendar, getDayAttendanceStatus } from './AttendanceCalendar';
 import { WORK_SITES } from '../services/geoService';
+import { isSupabaseConfigured } from '../services/supabase';
 
 export const DashboardView: React.FC = () => {
   const [supervisors, setSupervisors] = useState<Supervisor[]>([]);
@@ -24,11 +25,10 @@ export const DashboardView: React.FC = () => {
   // Search filter and photo modal states
   const [expandedPhoto, setExpandedPhoto] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState<string>('');
-
   const [selectedFilterSupId, setSelectedFilterSupId] = useState<string>('all');
   const [selectedMonthDate, setSelectedMonthDate] = useState<Date>(new Date());
 
-  // Metrics states
+  // Metrics summary states
   const [metrics, setMetrics] = useState({
     card1Title: 'Active Supervisors',
     card1Value: '0',
@@ -83,7 +83,6 @@ export const DashboardView: React.FC = () => {
 
     const totalCheckIns = targetLogs.length;
 
-    // Filtered face enrollment status
     let card1Title = 'Active Supervisors';
     let card1Value = String(supervisors.length);
     let card1Sub = 'Staff in database registry';
@@ -106,7 +105,6 @@ export const DashboardView: React.FC = () => {
       }
     }
 
-    // Compute average face score for valid comparisons
     const scores = targetLogs
       .map((l) => l.similarityScore)
       .filter((s): s is number => s !== null && s > 0);
@@ -135,33 +133,30 @@ export const DashboardView: React.FC = () => {
       return;
     }
 
-    const selectedSite = WORK_SITES.find(s => s.id === newSupSiteId) || WORK_SITES[0];
+    const site = WORK_SITES.find(s => s.id === newSupSiteId) || WORK_SITES[0];
 
-    const newSup: Supervisor = {
+    const newSupervisor: Supervisor = {
       id: `sup-${Date.now()}`,
       name: newSupName.trim(),
       referenceFaceDescriptor: null,
       referenceImage: null,
-      assignedSiteId: selectedSite.id,
-      assignedSiteName: selectedSite.name,
-      assignedLatitude: selectedSite.latitude,
-      assignedLongitude: selectedSite.longitude
+      assignedSiteId: site.id,
+      assignedSiteName: site.name,
+      assignedLatitude: site.latitude,
+      assignedLongitude: site.longitude
     };
 
-    try {
-      await addSupervisor(newSup);
-      await seedPastLogsForSupervisor(newSup.id, newSup.name, null);
-      setNewSupName('');
-      await loadAllData();
-    } catch (err) {
-      console.error(err);
-      setSupFormError('Failed to register supervisor.');
-    }
+    await addSupervisor(newSupervisor);
+    setNewSupName('');
+    await loadAllData();
   };
 
   const handleDeleteSupervisor = async (id: string) => {
-    if (confirm('Are you sure you want to remove this supervisor? This will delete their Face ID profile.')) {
+    if (confirm('Are you sure you want to delete this supervisor? This will also remove their check-in logs.')) {
       await deleteSupervisor(id);
+      if (selectedFilterSupId === id) {
+        setSelectedFilterSupId('all');
+      }
       await loadAllData();
     }
   };
@@ -173,15 +168,19 @@ export const DashboardView: React.FC = () => {
     // Prevent self-demotion
     const currentUserStr = localStorage.getItem('currentUser');
     if (currentUserStr) {
-      const currentUser = JSON.parse(currentUserStr);
-      if (currentUser.username === username) {
-        alert("You cannot demote yourself from Admin role!");
-        return;
+      try {
+        const currentUser = JSON.parse(currentUserStr);
+        if (currentUser.username === username && user.role === 'admin') {
+          alert("You cannot demote your own active Admin account!");
+          return;
+        }
+      } catch (e) {
+        console.error(e);
       }
     }
 
-    const nextRole = user.role === 'admin' ? 'supervisor' : 'admin';
-    const updatedUser = { ...user, role: nextRole as 'admin' | 'supervisor' };
+    const nextRole: 'admin' | 'supervisor' = user.role === 'admin' ? 'supervisor' : 'admin';
+    const updatedUser: UserAccount = { ...user, role: nextRole };
 
     await addUser(updatedUser);
     await loadAllData();
@@ -599,6 +598,81 @@ export const DashboardView: React.FC = () => {
                   })()}
                 </div>
               ))}
+            </div>
+          </div>
+
+          {/* User Accounts & Role Permissions (Promote to Admin / Demote to Supervisor) */}
+          <div className="glass-card" style={{ flex: 1, maxHeight: '240px', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <h4 style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: 0 }}>
+                User Accounts & Roles ({users.length})
+              </h4>
+              <span style={{ 
+                fontSize: '0.65rem', 
+                padding: '2px 6px', 
+                borderRadius: '4px', 
+                background: isSupabaseConfigured ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+                color: isSupabaseConfigured ? '#059669' : '#d97706',
+                fontWeight: 600
+              }}>
+                {isSupabaseConfigured ? '☁️ Cloud Synced' : '📦 Local Device Storage'}
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              {users.map((u) => {
+                const isAdmin = u.role === 'admin';
+                return (
+                  <div
+                    key={u.username}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      background: 'rgba(0,0,0,0.01)',
+                      padding: '0.5rem 0.75rem',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-color)',
+                      fontSize: '0.8rem'
+                    }}
+                  >
+                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                      <div style={{ fontWeight: 600 }}>
+                        {u.name} <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 400 }}>@{u.username}</span>
+                      </div>
+                      <div style={{ fontSize: '0.65rem', marginTop: '0.15rem' }}>
+                        <span style={{
+                          padding: '1px 6px',
+                          borderRadius: '4px',
+                          fontWeight: 'bold',
+                          background: isAdmin ? 'rgba(79, 70, 229, 0.12)' : 'rgba(16, 185, 129, 0.12)',
+                          color: isAdmin ? 'var(--color-primary)' : '#059669'
+                        }}>
+                          {u.role.toUpperCase()}
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => toggleUserRole(u.username)}
+                      className="btn"
+                      style={{
+                        padding: '0.3rem 0.6rem',
+                        fontSize: '0.7rem',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        borderRadius: '6px',
+                        border: '1px solid var(--border-color)',
+                        background: isAdmin ? 'rgba(239, 68, 68, 0.08)' : 'rgba(79, 70, 229, 0.08)',
+                        color: isAdmin ? '#dc2626' : 'var(--color-primary)',
+                      }}
+                      title={isAdmin ? 'Change to Supervisor' : 'Promote to Admin'}
+                    >
+                      {isAdmin ? 'Make Supervisor' : 'Make Admin ⚡'}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
 

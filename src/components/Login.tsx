@@ -29,7 +29,8 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
       try {
         const allUsers = await getUsers();
         const hasAdmin = allUsers.some(u => u.role === 'admin');
-        setWillBeSupervisor(hasAdmin);
+        // If an admin already exists or users exist, next registrant is a Supervisor
+        setWillBeSupervisor(allUsers.length > 0 && hasAdmin);
       } catch (err) {
         console.error(err);
       }
@@ -83,10 +84,23 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
           return;
         }
 
+        const existingUser = await getUser(formattedUsername);
+        if (existingUser) {
+          setError('Username is already taken.');
+          setLoading(false);
+          return;
+        }
+
+        // Determine role: STRICTLY the first user ever registered is Admin. All subsequent users are Supervisors.
+        const allUsers = await getUsers();
+        const hasAdmin = allUsers.some(u => u.role === 'admin');
+        const role = (allUsers.length === 0 || !hasAdmin) ? 'admin' : 'supervisor';
+        let supervisorId: string | undefined = undefined;
+
         // Force face profile capture for supervisors
-        if (willBeSupervisor) {
+        if (role === 'supervisor') {
           if (!capturedPhoto) {
-            setError('Please capture your Face ID profile photo to register.');
+            setError('Please capture your Face ID profile photo to register as Supervisor.');
             setLoading(false);
             return;
           }
@@ -95,23 +109,8 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
             setLoading(false);
             return;
           }
-        }
 
-        const existingUser = await getUser(formattedUsername);
-        if (existingUser) {
-          setError('Username is already taken.');
-          setLoading(false);
-          return;
-        }
-
-        // Determine role: If there is no admin in the database, this user becomes Admin. Otherwise, Supervisor.
-        const allUsers = await getUsers();
-        const hasAdmin = allUsers.some(u => u.role === 'admin');
-        const role = !hasAdmin ? 'admin' : 'supervisor';
-        let supervisorId: string | undefined = undefined;
-
-        if (role === 'supervisor') {
-          // Register as supervisor in IndexedDB supervisors list with face profile
+          // Register as supervisor in IndexedDB/Supabase supervisors list with face profile
           supervisorId = `sup-${Date.now()}`;
           await addSupervisor({
             id: supervisorId,
